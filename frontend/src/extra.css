@@ -33,11 +33,6 @@
 .login-box label{font-size:13px;margin:15px 0 7px;color:#3d5969}
 .login-box input{height:52px;border-radius:8px;padding:0 14px;font-size:15px;color:#173349}
 .login-box input::placeholder{font-size:14px;color:#92a1aa}
-.role-select-wrap{position:relative;margin-top:0}
-.login-box .role-select-modern{appearance:none;-webkit-appearance:none;width:100%;height:54px;padding:0 48px 0 14px;border:1px solid #d3e0e7;border-radius:9px;background:linear-gradient(145deg,#fff 0%,#f8fbfd 100%);box-shadow:0 2px 7px #1733490b;color:#183b52;font-size:16px;font-weight:600;cursor:pointer;transition:border-color .16s,box-shadow .16s,background .16s}
-.login-box .role-select-modern:hover{border-color:#8cb5c6;background:#fff;box-shadow:0 4px 12px #17334912}
-.login-box .role-select-modern:focus{outline:none;border-color:#3986a5;box-shadow:0 0 0 4px #3986a526}
-.role-select-chevron{position:absolute;right:15px;top:50%;transform:translateY(-50%) rotate(90deg);color:#4c8299;pointer-events:none}
 .login-button{height:52px;border-radius:8px;margin-top:25px;font-size:15px;font-weight:700;box-shadow:0 3px 8px #15435a22}
 .demo-box{padding:15px 16px;margin-top:25px;border-radius:9px}
 .demo-box>b{font-size:10px;letter-spacing:1px;margin-bottom:11px}
@@ -47,3 +42,43 @@
 .error-banner{font-size:13px;padding:11px 12px;border-radius:7px}
 .mobile-logo{font-size:15px}
 @media(max-width:600px){.login-panel{padding:24px 20px}.login-box h2{font-size:29px}.demo-box div{flex-wrap:wrap}.demo-box code{font-size:9px}}
+/* Consistent modern dropdowns across registration, test, rules, and admin forms */
+select:not(.role-select-modern){
+  appearance:none;
+  -webkit-appearance:none;
+  min-height:42px;
+  padding:9px 38px 9px 12px;
+  border:1px solid #d7e2e8;
+  border-radius:8px;
+  color:#24465b;
+  background-color:#fff;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%234b7084' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;
+  background-position:right 12px center;
+  background-size:16px;
+  box-shadow:0 1px 3px #1733490a;
+  font-size:13px;
+  transition:border-color .16s,box-shadow .16s,background-color .16s;
+}
+select:not(.role-select-modern):hover{border-color:#9bb9c7;background-color:#fbfdfe}
+select:not(.role-select-modern):focus{outline:none;border-color:#3986a5;box-shadow:0 0 0 3px #3986a522}
+select:not(.role-select-modern):disabled{color:#8998a1;background-color:#f2f5f6;cursor:not-allowed;opacity:.8}
+select:not(.role-select-modern) option{padding:8px;color:#24465b;background:#fff}
+.toolbar select:not(.role-select-modern){width:auto;min-width:180px}
+.role-select:not(.role-select-modern){width:auto;min-width:145px;font-size:12px}
+.workbench-row select:not(.role-select-modern){width:100%;min-height:38px;padding:7px 30px 7px 9px;background-position:right 8px center;background-size:14px;font-size:12px}
+.form-grid select:not(.role-select-modern){width:100%}
+/* Replaced the login role dropdown with accessible selectable role cards */
+.login-box .role-picker-label{display:block;font-size:13px;font-weight:600;color:#3d5969;margin:15px 0 7px}
+.role-choice-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:0 0 3px}
+.login-box .role-choice{position:relative;display:flex;align-items:center;justify-content:center;gap:8px;min-height:52px;margin:0;padding:9px 8px;border:1px solid #d7e2e8;border-radius:9px;background:linear-gradient(145deg,#fff,#f8fbfd);color:#526f80;font-size:12px;font-weight:600;text-align:center;cursor:pointer;transition:background .16s,border-color .16s,color .16s,box-shadow .16s,transform .16s}
+.login-box .role-choice:hover{border-color:#92b8c7;background:#f7fbfd;color:#24556d;transform:translateY(-1px)}
+.login-box .role-choice.selected{border-color:#458ba7;background:#eaf4f8;color:#164e68;box-shadow:0 0 0 2px #458ba71c}
+.login-box .role-choice>svg:first-of-type{flex:none;color:#53869a}
+.login-box .role-choice.selected>svg:first-of-type{color:#1e6b88}
+.login-box .role-choice .role-choice-check{position:absolute;top:5px;right:5px;color:#207b62;opacity:0;transform:scale(.8);transition:opacity .15s,transform .15s}
+.login-box .role-choice.selected .role-choice-check{opacity:1;transform:scale(1)}
+.login-box .role-choice input[type=radio]{position:absolute;inset:0;width:100%;height:100%;margin:0;opacity:0;cursor:pointer}
+.login-box .role-choice input[type=radio]:focus-visible{outline:3px solid #69afca;outline-offset:2px}
+.login-button:disabled{opacity:.58;cursor:not-allowed;transform:none;box-shadow:none}
+@media(max-width:600px){.role-choice-grid{gap:6px}.login-box .role-choice{flex-direction:column;gap:5px;min-height:67px;padding:8px 4px;font-size:11px}}
