@@ -1,0 +1,10 @@
+.env
+*.db
+__pycache__/
+*.py[cod]
+.venv/
+node_modules/
+.npm-cache/
+dist/
+backend/generated_reports/
+backend/attachments/
