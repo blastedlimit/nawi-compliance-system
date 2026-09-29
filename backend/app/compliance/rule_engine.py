@@ -89,5 +89,7 @@ def evaluate_all(instrument, observations, rules):
         details="; ".join(f"{r.rule_code} ({r.standard_version}): {value:g} {r.unit} {r.comparison_operator} {r.limit_value:g} {r.unit}" for r,value,_ in comparisons)
         results.append({"test_type":test_type,"calculated_value":raw,"calculated_unit":instrument.capacity_unit,"limit":next(iter(distinct)) if len(distinct)==1 else None,"status":"PASS" if passed else "FAIL","rule":rule,"rules":chosen,"details":details})
     statuses={x["status"] for x in results}
-    overall="NOT_EVALUATED" if "NOT_EVALUATED" in statuses or len(results)!=5 else ("FAIL" if "FAIL" in statuses else "PASS")
+    # A measured failure is decisive even when another required test is not yet
+    # evaluated. PASS still requires complete rule and observation coverage.
+    overall="FAIL" if "FAIL" in statuses else ("NOT_EVALUATED" if "NOT_EVALUATED" in statuses or len(results)!=5 else "PASS")
     return {"overall_status":overall,"results":results}

@@ -10,6 +10,8 @@ from app.compliance.engine import TEST_TYPES
 router=APIRouter(prefix="/api/rules",tags=["rules"])
 CLASSES=("I","II","III","IIII")
 OPS={"<=","<",">=",">","=="}
+DEMO_VERSION="SIH-DEMO-1.0 (NON-OFFICIAL)"
+DEMO_LIMITS={"MPE":0.02,"WEIGHING":0.02,"REPEATABILITY":0.02,"ECCENTRICITY":0.03,"TARE":0.01}
 def data(r):return {"id":r.id,"standard_name":r.standard_name,"standard_version":r.standard_version,"rule_code":r.rule_code,"test_type":r.test_type,"accuracy_class":r.accuracy_class,"applicable_range":r.applicable_range,"limit":r.limit_value,"unit":r.unit,"comparison_operator":r.comparison_operator,"description":r.description,"active":r.active,"source_reference":r.source_reference,"created_at":r.created_at,"updated_at":r.updated_at}
 
 @router.get("")
@@ -20,6 +22,24 @@ def listing(db:Session=Depends(get_db),u:User=Depends(current_user)):
     inactive={(x.test_type,x.accuracy_class) for x in rules if not x.active and x.standard_name=="OIML R-76"}
     coverage=[{"test_type":test,"accuracy_class":cls,"status":"CONFIGURED" if (test,cls) in existing else ("INACTIVE" if (test,cls) in inactive else "MISSING")} for test in TEST_TYPES for cls in CLASSES]
     return {"rules":[data(x) for x in rules],"coverage":coverage,"active_versions":active_versions}
+
+@router.post("/demo-profile",status_code=201)
+def load_demo_profile(db:Session=Depends(get_db),u:User=Depends(roles("ADMIN"))):
+    """Install an explicitly synthetic rule profile for controlled demonstrations."""
+    active=db.query(RuleConfiguration).filter(RuleConfiguration.standard_name=="OIML R-76",RuleConfiguration.active.is_(True)).all()
+    other_versions={r.standard_version for r in active if r.standard_version!=DEMO_VERSION}
+    if other_versions:
+        raise HTTPException(409,detail={"message":"An active non-demo OIML rule edition exists. Deactivate it deliberately before loading the demo profile.","active_versions":sorted(other_versions)})
+    existing={r.test_type for r in active if r.accuracy_class=="III" and r.standard_version==DEMO_VERSION}
+    created=[]
+    for test_type,limit in DEMO_LIMITS.items():
+        if test_type in existing:continue
+        rule=RuleConfiguration(standard_name="OIML R-76",standard_version=DEMO_VERSION,rule_code=f"SIH-DEMO-{test_type}-01",test_type=test_type,accuracy_class="III",applicable_range={"min_load":0.0,"max_load":26.0,"unit":"kg"},limit_value=limit,unit="kg",comparison_operator="<=",description=f"Illustrative SIH demonstration threshold for {test_type}; not an official OIML R-76 limit and not suitable for legal verification.",source_reference="SIH prototype demonstration profile, version 1.0; synthetic configurable value, no official OIML clause claimed",active=True)
+        db.add(rule);db.flush();created.append(rule)
+        db.add(AuditLog(user_id=u.id,action="RULE_CONFIGURATION_CHANGED",entity_type="RULE",entity_id=str(rule.id),details=f"Created explicitly non-official {DEMO_VERSION} profile rule {rule.rule_code}"))
+    db.commit()
+    rows=db.query(RuleConfiguration).filter(RuleConfiguration.standard_name=="OIML R-76",RuleConfiguration.standard_version==DEMO_VERSION,RuleConfiguration.accuracy_class=="III",RuleConfiguration.active.is_(True)).all()
+    return {"version":DEMO_VERSION,"created":len(created),"rules":[data(r) for r in rows],"notice":"Synthetic SIH demonstration thresholds only. Not official OIML values and not legal certification."}
 
 @router.post("",status_code=201)
 def create(body:dict,db:Session=Depends(get_db),u:User=Depends(roles("ADMIN"))):

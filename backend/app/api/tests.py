@@ -1,4 +1,5 @@
 from datetime import date
+import math
 import json
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -19,7 +20,12 @@ def require_current_passing_evaluation(t,db):
         old=saved.get(result["test_type"]);rule=result.get("rule") or (result.get("rules") or [None])[0]
         if not old or not rule or old.status!="PASS" or old.rule_code!=rule.rule_code or old.standard_version!=rule.standard_version or old.details!=result["details"] or old.calculated_value!=result["calculated_value"] or old.limit_value!=result["limit"]:
             raise HTTPException(409,"Rules or observations changed after evaluation. Run compliance again before final review.")
-def view(t): return {"id":t.id,"instrument_id":t.instrument_id,"instrument":t.instrument.serial_number,"model":t.instrument.model,"operator":t.operator.name,"operator_id":t.operator_id,"status":t.status,"test_date":str(t.test_date),"laboratory":t.laboratory,"temperature":t.temperature,"humidity":t.humidity,"pressure":t.pressure,"remarks":t.remarks,"rejection_reason":t.rejection_reason,"observations":[{"id":o.id,"test_type":o.test_type,"test_point":o.test_point,"applied_load":o.applied_load,"indicated_value":o.indicated_value,"error":o.error,"observation_data":o.observation_data} for o in t.observations],"results":[{"id":r.id,"test_type":r.test_type,"limit_value":r.limit_value,"calculated_value":r.calculated_value,"calculated_unit":r.calculated_unit,"limit_unit":r.limit_unit,"status":r.status,"details":r.details,"standard_name":r.standard_name,"standard_version":r.standard_version,"rule_code":r.rule_code,"rule_description":r.rule_description} for r in t.results]}
+def overall_status(results):
+    statuses=[r.status for r in results]
+    if "FAIL" in statuses:return "FAIL"
+    if len(statuses)!=5 or "NOT_EVALUATED" in statuses:return "NOT_EVALUATED"
+    return "PASS" if all(x=="PASS" for x in statuses) else "NOT_EVALUATED"
+def view(t): return {"id":t.id,"instrument_id":t.instrument_id,"instrument":t.instrument.serial_number,"instrument_data":{"manufacturer":t.instrument.manufacturer,"model":t.instrument.model,"serial_number":t.instrument.serial_number,"instrument_type":t.instrument.instrument_type,"accuracy_class":t.instrument.accuracy_class,"max_capacity":t.instrument.max_capacity,"min_capacity":t.instrument.min_capacity,"capacity_unit":t.instrument.capacity_unit,"verification_interval_e":t.instrument.verification_interval_e,"display_interval_d":t.instrument.display_interval_d,"number_of_verification_intervals_n":t.instrument.number_of_verification_intervals_n},"model":t.instrument.model,"operator":t.operator.name,"operator_id":t.operator_id,"status":t.status,"overall_status":overall_status(t.results),"test_date":str(t.test_date),"laboratory":t.laboratory,"temperature":t.temperature,"humidity":t.humidity,"pressure":t.pressure,"remarks":t.remarks,"rejection_reason":t.rejection_reason,"observations":[{"id":o.id,"test_type":o.test_type,"test_point":o.test_point,"applied_load":o.applied_load,"indicated_value":o.indicated_value,"error":o.error,"observation_data":o.observation_data} for o in t.observations],"results":[{"id":r.id,"test_type":r.test_type,"limit_value":r.limit_value,"calculated_value":r.calculated_value,"calculated_unit":r.calculated_unit,"limit_unit":r.limit_unit,"status":r.status,"details":r.details,"standard_name":r.standard_name,"standard_version":r.standard_version,"rule_code":r.rule_code,"rule_description":r.rule_description} for r in t.results]}
 @router.get("")
 def listing(db:Session=Depends(get_db),u:User=Depends(current_user)):
     q=db.query(TestSession)
@@ -43,7 +49,7 @@ def add_observations(test_id:int,d:dict,db:Session=Depends(get_db),u:User=Depend
     t=db.get(TestSession,test_id)
     if not t: raise HTTPException(404,"Test session not found")
     verify_access(t,u)
-    if t.status not in ("DRAFT","IN_PROGRESS","REJECTED"): raise HTTPException(409,"Observations are locked for this workflow status")
+    if t.status not in ("DRAFT","IN_PROGRESS","COMPLETED","REJECTED"): raise HTTPException(409,"Observations are locked for this workflow status")
     rows=d.get("observations",[])
     if not rows: raise HTTPException(422,"Add at least one observation")
     for row in rows:
@@ -51,13 +57,33 @@ def add_observations(test_id:int,d:dict,db:Session=Depends(get_db),u:User=Depend
         if typ not in {"WEIGHING","MPE","REPEATABILITY","ECCENTRICITY","TARE"}: raise HTTPException(422,"Unsupported test type")
         applied=float(row["applied_load"]);indicated=float(row["indicated_value"])
         t.observations.append(TestObservation(test_type=typ,test_point=str(row.get("test_point","")),applied_load=applied,indicated_value=indicated,error=indicated-applied,observation_data=row.get("observation_data",{})))
-    t.status="IN_PROGRESS";db.add(AuditLog(user_id=u.id,action="OBSERVATION_UPDATED",entity_type="TEST",entity_id=str(t.id),details=f"Added {len(rows)} observation(s)"));db.commit();return view(t)
+    t.results.clear();t.status="IN_PROGRESS";db.add(AuditLog(user_id=u.id,action="OBSERVATION_UPDATED",entity_type="TEST",entity_id=str(t.id),details=f"Added {len(rows)} observation(s)"));db.commit();return view(t)
+@router.put("/{test_id}/observations")
+def replace_observations(test_id:int,d:dict,db:Session=Depends(get_db),u:User=Depends(roles("ADMIN","LAB_TECHNICIAN"))):
+    t=db.get(TestSession,test_id)
+    if not t:raise HTTPException(404,"Test session not found")
+    verify_access(t,u)
+    if t.status not in ("DRAFT","IN_PROGRESS","COMPLETED","REJECTED"):raise HTTPException(409,"Observations are locked for this workflow status")
+    rows=d.get("observations",[])
+    if not rows:raise HTTPException(422,"Add at least one observation")
+    values=[]
+    for row in rows:
+        typ=str(row.get("test_type","WEIGHING")).upper()
+        if typ not in {"WEIGHING","MPE","REPEATABILITY","ECCENTRICITY","TARE"}:raise HTTPException(422,"Unsupported test type")
+        try:applied=float(row["applied_load"]);indicated=float(row["indicated_value"])
+        except (KeyError,TypeError,ValueError):raise HTTPException(422,"Every observation needs numeric applied load and indication")
+        if not math.isfinite(applied) or not math.isfinite(indicated):raise HTTPException(422,"Observation values must be finite")
+        values.append(TestObservation(test_type=typ,test_point=str(row.get("test_point","")),applied_load=applied,indicated_value=indicated,error=indicated-applied,observation_data=row.get("observation_data",{})))
+    t.observations.clear();t.observations.extend(values);t.results.clear();t.status="IN_PROGRESS"
+    db.add(AuditLog(user_id=u.id,action="OBSERVATION_REPLACED",entity_type="TEST",entity_id=str(t.id),details=f"Replaced observation set with {len(values)} row(s)"));db.commit();return view(t)
 @router.post("/{test_id}/run-compliance")
 def calculate(test_id:int,db:Session=Depends(get_db),u:User=Depends(roles("ADMIN","LAB_TECHNICIAN"))):
     t=db.get(TestSession,test_id)
     if not t: raise HTTPException(404,"Test session not found")
     verify_access(t,u)
+    if t.status in ("UNDER_REVIEW","APPROVED"):raise HTTPException(409,"Results are locked while awaiting or after officer review")
     t.results.clear(); outcome=evaluate_all(t.instrument,t.observations,db.query(RuleConfiguration).filter(RuleConfiguration.active.is_(True)).all())
+    t.status="COMPLETED" if outcome["overall_status"] in {"PASS","FAIL"} else "IN_PROGRESS"
     versions=sorted({f"{x['rules'][0].standard_name} {x['rules'][0].standard_version}" for x in outcome["results"] if x.get("rules")})
     for r in outcome["results"]:
         rule=r.get("rule") or (r.get("rules") or [None])[0]
@@ -70,7 +96,9 @@ def submit(test_id:int,db:Session=Depends(get_db),u:User=Depends(roles("ADMIN","
     if not t: raise HTTPException(404,"Test session not found")
     verify_access(t,u)
     require_current_passing_evaluation(t,db)
-    t.status="UNDER_REVIEW";db.add(AuditLog(user_id=u.id,action="REPORT_SUBMITTED",entity_type="TEST",entity_id=str(t.id),details="All five test types revalidated against current active rule records."));db.commit();return view(t)
+    t.status="UNDER_REVIEW"
+    for report in t.reports:report.status=t.status
+    db.add(AuditLog(user_id=u.id,action="REPORT_SUBMITTED",entity_type="TEST",entity_id=str(t.id),details="All five test types revalidated against current active rule records."));db.commit();return view(t)
 @router.post("/{test_id}/review")
 def review(test_id:int,d:dict,db:Session=Depends(get_db),u:User=Depends(roles("ADMIN","APPROVING_OFFICER"))):
     t=db.get(TestSession,test_id)
@@ -81,12 +109,20 @@ def review(test_id:int,d:dict,db:Session=Depends(get_db),u:User=Depends(roles("A
     if decision=="APPROVE":require_current_passing_evaluation(t,db)
     t.status="APPROVED" if decision=="APPROVE" else "REJECTED";t.rejection_reason=reason
     for report in t.reports:report.status=t.status
-    db.add(AuditLog(user_id=u.id,action="REPORT_APPROVED" if decision=="APPROVE" else "REPORT_REJECTED",entity_type="TEST",entity_id=str(t.id),details=reason));db.commit();return view(t)
+    review_log=AuditLog(user_id=u.id,action="REPORT_APPROVED" if decision=="APPROVE" else "REPORT_REJECTED",entity_type="TEST",entity_id=str(t.id),details=reason)
+    db.add(review_log);db.flush()
+    if t.reports:
+        from app.api.reports import make_report
+        from app.db.models import Attachment
+        attachments=db.query(Attachment).filter((Attachment.test_session_id==t.id)|(Attachment.instrument_id==t.instrument_id)).order_by(Attachment.created_at).all()
+        reviewer={"name":u.name,"comments":reason,"date":str(review_log.timestamp)}
+        for report in t.reports:report.status=t.status;make_report(t,report,attachments,reviewer,db)
+    db.commit();return view(t)
 
 @compliance_router.get("/{test_id}")
 def compliance_results(test_id:int,db:Session=Depends(get_db),u:User=Depends(current_user)):
     t=db.get(TestSession,test_id)
     if not t: raise HTTPException(404,"Test session not found")
     verify_access(t,u)
-    status="NOT_EVALUATED" if len(t.results)!=5 or any(r.status=="NOT_EVALUATED" for r in t.results) else ("FAIL" if any(r.status=="FAIL" for r in t.results) else ("PASS" if all(r.status=="PASS" for r in t.results) else "NOT_EVALUATED"))
+    status=overall_status(t.results)
     return {"test_session_id":t.id,"overall_status":status,"results":[{"test_type":r.test_type,"calculated_value":r.calculated_value,"calculated_unit":r.calculated_unit,"limit":r.limit_value,"limit_unit":r.limit_unit,"status":r.status,"details":r.details,"standard_name":r.standard_name,"standard_version":r.standard_version,"rule_code":r.rule_code,"rule_description":r.rule_description} for r in t.results]}

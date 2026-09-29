@@ -49,7 +49,7 @@ class TestSession(Base):
     operator: Mapped[User] = relationship()
     observations: Mapped[list["TestObservation"]] = relationship(cascade="all, delete-orphan")
     results: Mapped[list["ComplianceResult"]] = relationship(cascade="all, delete-orphan")
-    reports: Mapped[list["Report"]] = relationship(cascade="all, delete-orphan")
+    reports: Mapped[list["Report"]] = relationship(back_populates="test_session",cascade="all, delete-orphan")
 
 class TestObservation(Base):
     __tablename__ = "test_observations"
@@ -91,6 +91,7 @@ class Report(Base):
     pdf_path: Mapped[str] = mapped_column(String(500), default="")
     docx_path: Mapped[str] = mapped_column(String(500), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    test_session: Mapped["TestSession"] = relationship(back_populates="reports")
 
 class Attachment(Base):
     __tablename__ = "attachments"

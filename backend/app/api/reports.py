@@ -1,86 +1,145 @@
-import os
-from xml.sax.saxutils import escape
 from pathlib import Path
 from uuid import uuid4
-from fastapi import APIRouter,Depends,HTTPException
+
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_LEFT
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import mm
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 from sqlalchemy.orm import Session
 from docx import Document
-from reportlab.lib.pagesizes import A4
-from reportlab.platypus import SimpleDocTemplate,Paragraph,Spacer,Table,TableStyle
-from reportlab.lib import colors
-from reportlab.lib.styles import getSampleStyleSheet
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.shared import Inches, Pt, RGBColor
+
 from app.db.database import get_db
-from app.db.models import Report,TestSession,Instrument,AuditLog,User
-from app.api.deps import current_user,roles
+from app.db.models import Attachment, AuditLog, Report, TestSession, Instrument, User, RuleConfiguration
+from app.api.deps import current_user, roles
+
 router=APIRouter(prefix="/api/reports",tags=["reports"])
 OUT=Path(__file__).resolve().parents[2]/"generated_reports";OUT.mkdir(exist_ok=True)
-def make_report(t,r):
-    inst=t.instrument; filename=str(r.id)
-    pdf=OUT/(filename+".pdf"); docx=OUT/(filename+".docx")
-    statuses=[x.status for x in t.results]
-    evaluation="NOT_EVALUATED" if len(statuses)!=5 or "NOT_EVALUATED" in statuses else ("FAIL" if "FAIL" in statuses else ("PASS" if all(x=="PASS" for x in statuses) else "NOT_EVALUATED"))
-    versions=sorted({x.standard_version for x in t.results if x.standard_version!="UNCONFIGURED"})
-    version=", ".join(versions) if versions else "UNCONFIGURED"
-    has_missing_rule=any(x.status=="NOT_EVALUATED" and x.rule_code=="MISSING_RULE" for x in t.results)
-    finalization=("Compliance evaluation could not be finalized because the applicable OIML R-76 rule configuration is unavailable." if has_missing_rule else "Compliance evaluation could not be finalized because required observations or rule coverage are incomplete.") if evaluation=="NOT_EVALUATED" else "Prototype evaluation record; this report is not an official legal certificate."
-    styles=getSampleStyleSheet();story=[Paragraph("NAWI TEST REPORT",styles["Title"]),Paragraph("OIML R-76 based compliance evaluation • Prototype record",styles["Normal"]),Spacer(1,14)]
-    fields=[["Instrument identification","Value"],["Manufacturer",inst.manufacturer],["Model / serial",f"{inst.model} / {inst.serial_number}"],["Instrument type",inst.instrument_type],["Class",inst.accuracy_class],["Capacity / min",f"{inst.max_capacity} / {inst.min_capacity} {inst.capacity_unit}"],["e / d / n",f"{inst.verification_interval_e} / {inst.display_interval_d} / {inst.number_of_verification_intervals_n}"],["Laboratory",t.laboratory],["Temperature / humidity / pressure",f"{t.temperature} °C / {t.humidity} %RH / {t.pressure} hPa"],["Test date / operator",f"{t.test_date} / {t.operator.name}"],["Report number",r.report_number],["Status",t.status],["Standard rule version","OIML R-76 / UNCONFIGURED; prototype, not legal certification"]]
-    fields.extend([["Evaluation status",evaluation],["Standard","OIML R-76"],["Edition / rule version",version]])
-    story.insert(2,Paragraph("Evaluation status: "+evaluation,styles["Heading2"]));story.insert(3,Paragraph(finalization,styles["Normal"]))
-    tb=Table(fields,colWidths=[185,330],repeatRows=1);tb.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#12304a")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("GRID",(0,0),(-1,-1),.4,colors.HexColor("#cbd5df")),("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.white,colors.HexColor("#f2f6f9")]),("PADDING",(0,0),(-1,-1),7)]));story += [tb,Spacer(1,14),Paragraph("Test observations",styles["Heading2"])];
-    obs=[["Test","Point","Load","Indication","Error"]]+[[o.test_type,o.test_point,str(o.applied_load),str(o.indicated_value),str(o.error)] for o in t.observations]
-    story.append(Table(obs,colWidths=[90,95,80,100,90],repeatRows=1,style=TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#dce8f1")),("GRID",(0,0),(-1,-1),.4,colors.grey),("PADDING",(0,0),(-1,-1),6)])))
-    story += [Spacer(1,14),Paragraph("Compliance results",styles["Heading2"])]
-    res=[["Test","Value / unit","Limit / unit","Status","Rule","Edition"]]+[[x.test_type,f"{x.calculated_value if x.calculated_value is not None else 'Not available'} {x.calculated_unit}",f"{x.limit_value if x.limit_value is not None else ('Range-specific; see details' if x.status in ('PASS','FAIL') else 'Not configured')} {x.limit_unit}",x.status,x.rule_code,x.standard_version] for x in t.results]
-    if len(res)==1: res.append(["No results","Not available","Not configured","NOT_EVALUATED","MISSING_RULE","UNCONFIGURED"])
-    story.append(Table(res,colWidths=[67,78,78,81,110,86],repeatRows=1,style=TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#dce8f1")),("GRID",(0,0),(-1,-1),.4,colors.grey),("PADDING",(0,0),(-1,-1),6)])))
-    for result in t.results:story.append(Paragraph(escape(f"{result.test_type}: {result.details}"),styles["BodyText"]))
-    def footer(canvas,doc):
-        canvas.saveState();canvas.setFont("Helvetica",8);canvas.drawString(40,24,"NAWI Compliance • Prototype record; not a legal certificate");canvas.drawRightString(555,24,f"Page {doc.page}");canvas.restoreState()
-    SimpleDocTemplate(str(pdf),pagesize=A4,leftMargin=35,rightMargin=35,topMargin=42,bottomMargin=42).build(story,onFirstPage=footer,onLaterPages=footer)
-    d=Document();d.add_heading("NAWI TEST REPORT",0);d.add_paragraph("OIML R-76 based compliance evaluation • Prototype record")
-    d.add_heading("Evaluation status: "+evaluation,2);d.add_paragraph(finalization)
-    for row in fields[1:]: d.add_paragraph(f"{row[0]}: {row[1]}")
-    d.add_heading("Test observations",1);tab=d.add_table(rows=1,cols=5);tab.style="Light Shading Accent 1"
-    for cell,val in zip(tab.rows[0].cells,obs[0]):cell.text=val
-    for row in obs[1:]:
+NAVY=colors.HexColor("#17324d"); BLUE=colors.HexColor("#eaf1f7"); GRID=colors.HexColor("#d8e0e8")
+
+def evaluation(t):
+    statuses=[r.status for r in t.results]
+    if "FAIL" in statuses:return "FAIL"
+    if len(statuses)!=5 or "NOT_EVALUATED" in statuses:return "NOT_EVALUATED"
+    return "PASS" if all(s=="PASS" for s in statuses) else "NOT_EVALUATED"
+
+def _text(value):return "—" if value is None or value=="" else str(value)
+
+def _pdf_table(rows,widths=None):
+    table=Table(rows,colWidths=widths,repeatRows=1,hAlign="LEFT")
+    table.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),NAVY),("TEXTCOLOR",(0,0),(-1,0),colors.white),("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),("GRID",(0,0),(-1,-1),.45,GRID),("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.white,BLUE]),("VALIGN",(0,0),(-1,-1),"TOP"),("LEFTPADDING",(0,0),(-1,-1),7),("RIGHTPADDING",(0,0),(-1,-1),7),("TOPPADDING",(0,0),(-1,-1),6),("BOTTOMPADDING",(0,0),(-1,-1),6)]))
+    return table
+
+def make_report(t,r,attachments=(),review=None,db=None):
+    inst=t.instrument;pdf=OUT/(str(r.id)+".pdf");docx=OUT/(str(r.id)+".docx")
+    overall=evaluation(t);results={x.test_type:x for x in t.results}
+    styles=getSampleStyleSheet()
+    styles.add(ParagraphStyle(name="ReportTitle",parent=styles["Title"],fontName="Helvetica-Bold",fontSize=17,leading=21,textColor=NAVY,alignment=TA_LEFT,spaceAfter=3))
+    styles.add(ParagraphStyle(name="SectionHeading",parent=styles["Heading2"],fontName="Helvetica-Bold",fontSize=10,leading=13,textColor=NAVY,spaceBefore=12,spaceAfter=6,keepWithNext=True))
+    styles.add(ParagraphStyle(name="FinePrint",parent=styles["Normal"],fontSize=8,textColor=colors.HexColor("#586b7c"),leading=11))
+    fields=[("Report ID",r.report_number),("Report created",str(r.created_at)),("Session created",str(t.created_at)),("Test date",str(t.test_date)),("Laboratory",t.laboratory),("Operator",t.operator.name),("Reviewer / Approving Officer",review["name"] if review else "Pending / not recorded"),("Review date",review.get("date","Pending") if review else "Pending"),("Review status",t.status),("Review comments",review["comments"] if review else t.rejection_reason)]
+    instrument=[("Manufacturer",inst.manufacturer),("Model",inst.model),("Serial number",inst.serial_number),("Instrument type",inst.instrument_type),("Accuracy class",inst.accuracy_class),("Max / Min",f"{inst.max_capacity} / {inst.min_capacity} {inst.capacity_unit}"),("Verification interval e",f"{inst.verification_interval_e} {inst.capacity_unit}"),("Display interval d",f"{inst.display_interval_d} {inst.capacity_unit}"),("Number of intervals n",inst.number_of_verification_intervals_n),("Registered / modified",f"{inst.created_at} / {inst.updated_at}")]
+    environment=[("Temperature",f"{_text(t.temperature)} °C"),("Relative humidity",f"{_text(t.humidity)} %RH"),("Atmospheric pressure",f"{_text(t.pressure)} hPa")]
+    rules=sorted({f"{x.standard_name} / {x.standard_version}" for x in t.results})
+    obs_rows=[["Test","Point / position","Applied load","Indication","Error"]]+[[o.test_type,_text(o.test_point),f"{o.applied_load:g} {inst.capacity_unit}",f"{o.indicated_value:g} {inst.capacity_unit}",f"{o.error:+g} {inst.capacity_unit}"] for o in t.observations]
+    result_rows=[["Test","Calculated value","Applicable limit","Result","Rule / version"]]
+    source_rows=[["Test","Rule code / version","Configuration source"]]
+    for name in ("MPE","WEIGHING","REPEATABILITY","ECCENTRICITY","TARE"):
+        x=results.get(name)
+        result_rows.append([name,f"{x.calculated_value} {x.calculated_unit}" if x and x.calculated_value is not None else "Not available",f"{x.limit_value} {x.limit_unit}" if x and x.limit_value is not None else "Not configured",x.status if x else "NOT_EVALUATED",f"{x.rule_code} / {x.standard_version}" if x else "MISSING_RULE"])
+        rule=db.get(RuleConfiguration,x.rule_id) if db and x and x.rule_id else None
+        source_rows.append([name,f"{x.rule_code} / {x.standard_version}" if x else "MISSING_RULE / UNCONFIGURED",rule.source_reference if rule else "No active rule source recorded"])
+    story=[Paragraph("NON-AUTOMATIC WEIGHING INSTRUMENT",styles["ReportTitle"]),Paragraph("TEST REPORT · OIML R-76 evaluation prototype",styles["Normal"]),Spacer(1,5*mm),Paragraph(f"OVERALL RESULT: {overall}",ParagraphStyle("overall",parent=styles["Heading1"],textColor=colors.HexColor("#187348" if overall=="PASS" else "#ad3434" if overall=="FAIL" else "#8a6411"),spaceAfter=5)),Paragraph("This is a software evaluation record. It is not an official government certificate. Configured demonstration rules are synthetic and are not official OIML limits.",styles["FinePrint"])]
+    def section(title,rows):
+        story.append(Paragraph(title,styles["SectionHeading"]));story.append(_pdf_table([["Field","Value"]]+[[str(k),str(v)] for k,v in rows],widths=[54*mm,119*mm]))
+    section("1 · REPORT INFORMATION",fields);section("2 · INSTRUMENT IDENTIFICATION",instrument);section("3 · ENVIRONMENTAL CONDITIONS",environment)
+    story.extend([Paragraph("4 · TEST OBSERVATIONS",styles["SectionHeading"]),_pdf_table(obs_rows,[25*mm,36*mm,31*mm,31*mm,31*mm]),Paragraph("5 · TEST RESULTS",styles["SectionHeading"]),_pdf_table(result_rows,[27*mm,32*mm,30*mm,24*mm,42*mm])])
+    story.extend([Spacer(1,3*mm),Paragraph("Evaluation configuration: "+("; ".join(rules) if rules else "unconfigured"),styles["FinePrint"]),Paragraph("6 · CONFIGURED RULE SOURCES",styles["SectionHeading"]),_pdf_table(source_rows,[24*mm,60*mm,89*mm]),Paragraph("7 · APPROVAL / REVIEW",styles["SectionHeading"]),_pdf_table([["Status","Officer","Review date","Decision comments"],[t.status,fields[6][1],fields[7][1],fields[9][1] or "—"]],[28*mm,42*mm,38*mm,47*mm]),Paragraph("8 · SUPPORTING DOCUMENTS",styles["SectionHeading"]),_pdf_table([["File","Type","Uploaded"]]+([[a.filename,a.content_type,str(a.created_at)] for a in attachments] or [["No supporting documents linked","—","—"]]),[65*mm,55*mm,35*mm])])
+    def page(canvas,doc):
+        canvas.saveState();w,h=A4;canvas.setStrokeColor(GRID);canvas.line(18*mm,h-16*mm,w-18*mm,h-16*mm);canvas.setFont("Helvetica-Bold",8);canvas.setFillColor(NAVY);canvas.drawString(18*mm,h-12*mm,"NAWI COMPLIANCE · TEST RECORD");canvas.setFont("Helvetica",8);canvas.setFillColor(colors.HexColor("#586b7c"));canvas.drawString(18*mm,10*mm,f"{r.report_number} · Prototype record · Not a legal certificate");canvas.drawRightString(w-18*mm,10*mm,f"Page {doc.page}");canvas.restoreState()
+    SimpleDocTemplate(str(pdf),pagesize=A4,leftMargin=18*mm,rightMargin=18*mm,topMargin=22*mm,bottomMargin=17*mm,title=f"NAWI Test Report {r.report_number}",author="NAWI Compliance prototype").build(story,onFirstPage=page,onLaterPages=page)
+
+    d=Document();sec=d.sections[0];sec.header.paragraphs[0].text="NAWI COMPLIANCE  ·  LABORATORY TEST RECORD";sec.footer.paragraphs[0].text=f"{r.report_number}  |  Prototype record · Not a legal certificate"
+    sec.left_margin=Inches(.7);sec.right_margin=Inches(.7)
+    normal=d.styles["Normal"];normal.font.name="Aptos";normal.font.size=Pt(9);normal.font.color.rgb=RGBColor(44,62,80)
+    title=d.add_heading("NON-AUTOMATIC WEIGHING INSTRUMENT",0);title.alignment=WD_ALIGN_PARAGRAPH.LEFT
+    d.add_heading("TEST REPORT · OIML R-76 evaluation prototype",2)
+    d.add_heading(f"OVERALL RESULT: {overall}",1)
+    d.add_paragraph("Software evaluation record only; not an official government certificate. Synthetic demo rules are not official OIML limits.")
+    def word_table(heading,rows):
+        d.add_heading(heading,2);tab=d.add_table(rows=0,cols=2);tab.style="Light Shading Accent 1"
+        for a,b in rows:
+            cells=tab.add_row().cells;cells[0].text=str(a);cells[1].text=str(b)
+    word_table("1 · Report Information",fields);word_table("2 · Instrument Identification",instrument);word_table("3 · Environmental Conditions",environment)
+    d.add_heading("4 · Test Observations",2);tab=d.add_table(rows=1,cols=5);tab.style="Light Shading Accent 1"
+    for c,v in zip(tab.rows[0].cells,obs_rows[0]):c.text=v
+    for row in obs_rows[1:]:
         cells=tab.add_row().cells
-        for cell,val in zip(cells,row):cell.text=val
-    d.add_heading("Compliance results",1);result_table=d.add_table(rows=1,cols=6);result_table.style="Light Shading Accent 1"
-    for cell,val in zip(result_table.rows[0].cells,res[0]):cell.text=val
-    for row in res[1:]:
-        cells=result_table.add_row().cells
-        for cell,val in zip(cells,row):cell.text=val
-    for result in t.results:d.add_paragraph(f"{result.test_type}: {result.details}")
-    d.add_paragraph("Prototype record; not a legal certificate.");d.save(docx)
-    r.pdf_path=str(pdf);r.docx_path=str(docx)
+        for c,v in zip(cells,row):c.text=str(v)
+    d.add_heading("5 · Test Results",2);tab=d.add_table(rows=1,cols=5);tab.style="Light Shading Accent 1"
+    for c,v in zip(tab.rows[0].cells,result_rows[0]):c.text=v
+    for row in result_rows[1:]:
+        cells=tab.add_row().cells
+        for c,v in zip(cells,row):c.text=str(v)
+    d.add_paragraph("Evaluation configuration: "+("; ".join(rules) if rules else "unconfigured"))
+    d.add_heading("6 · Configured Rule Sources",2);tab=d.add_table(rows=1,cols=3);tab.style="Light Shading Accent 1"
+    for c,v in zip(tab.rows[0].cells,source_rows[0]):c.text=v
+    for row in source_rows[1:]:
+        cells=tab.add_row().cells
+        for c,v in zip(cells,row):c.text=str(v)
+    word_table("7 · Approval / Review",[("Status",t.status),("Officer",fields[6][1]),("Review date",fields[7][1]),("Decision comments",fields[9][1] or "—")])
+    d.add_heading("8 · Supporting Documents",2);tab=d.add_table(rows=1,cols=3);tab.style="Light Shading Accent 1"
+    for c,v in zip(tab.rows[0].cells,["File","Type","Uploaded"]):c.text=v
+    for row in ([[a.filename,a.content_type,str(a.created_at)] for a in attachments] or [["No supporting documents linked","—","—"]]):
+        cells=tab.add_row().cells
+        for c,v in zip(cells,row):c.text=str(v)
+    d.save(docx);r.pdf_path=str(pdf);r.docx_path=str(docx)
+
 @router.get("")
 def listing(q:str="",status:str="",db:Session=Depends(get_db),u:User=Depends(current_user)):
     query=db.query(Report).join(TestSession)
     if u.role=="LAB_TECHNICIAN":query=query.filter(TestSession.operator_id==u.id)
     if q:query=query.filter((Report.report_number.contains(q))|(TestSession.instrument.has(Instrument.serial_number.contains(q)))|(TestSession.instrument.has(Instrument.model.contains(q))))
-    if status:query=query.filter(Report.status==status)
-    return [{"id":r.id,"report_number":r.report_number,"status":r.status,"test_session_id":r.test_session_id,"serial_number":r.test_session.instrument.serial_number,"model":r.test_session.instrument.model,"test_date":str(r.test_session.test_date),"created_at":r.created_at} for r in query.order_by(Report.created_at.desc()).all()]
+    if status=="PENDING":query=query.filter(Report.status.notin_(["APPROVED","REJECTED"]))
+    elif status in {"APPROVED","REJECTED"}:query=query.filter(Report.status==status)
+    rows=[]
+    for r in query.order_by(Report.created_at.desc()).all():
+        t=r.test_session;rows.append({"id":r.id,"report_number":r.report_number,"status":r.status,"overall_status":evaluation(t),"test_session_id":t.id,"serial_number":t.instrument.serial_number,"model":t.instrument.model,"operator":t.operator.name,"test_date":str(t.test_date),"created_at":r.created_at})
+    if status in {"PASS","FAIL"}:rows=[r for r in rows if r["overall_status"]==status]
+    return rows
+
 @router.post("/from-test/{test_id}",status_code=201)
 def generate(test_id:int,db:Session=Depends(get_db),u:User=Depends(roles("ADMIN","LAB_TECHNICIAN","APPROVING_OFFICER"))):
     t=db.get(TestSession,test_id)
-    if not t: raise HTTPException(404,"Test session not found")
-    if u.role=="LAB_TECHNICIAN" and t.operator_id!=u.id: raise HTTPException(403,"You can only generate reports for your own tests")
-    if not t.results: raise HTTPException(409,"Run compliance before generating a report")
-    r=Report(test_session_id=t.id,report_number=f"NAWI-{t.test_date:%Y%m%d}-{uuid4().hex[:6].upper()}",status=t.status);db.add(r);db.flush();make_report(t,r);db.add(AuditLog(user_id=u.id,action="REPORT_GENERATED",entity_type="REPORT",entity_id=str(r.id)));db.commit();return {"id":r.id,"report_number":r.report_number,"pdf_path":r.pdf_path,"docx_path":r.docx_path}
+    if not t:raise HTTPException(404,"Test session not found")
+    if u.role=="LAB_TECHNICIAN" and t.operator_id!=u.id:raise HTTPException(403,"You can only generate reports for your own tests")
+    if not t.results:raise HTTPException(409,"Run compliance before generating a report")
+    r=Report(test_session_id=t.id,report_number=f"NAWI-{t.test_date:%Y%m%d}-{uuid4().hex[:6].upper()}",status=t.status);db.add(r);db.flush()
+    audit=db.query(AuditLog).filter(AuditLog.entity_type=="TEST",AuditLog.entity_id==str(t.id),AuditLog.action.in_(["REPORT_APPROVED","REPORT_REJECTED"])).order_by(AuditLog.timestamp.desc()).first()
+    review={"name":db.get(User,audit.user_id).name if audit and audit.user_id else "Pending / not recorded","comments":audit.details if audit else "","date":str(audit.timestamp)} if audit else None
+    attachments=db.query(Attachment).filter((Attachment.test_session_id==t.id)|(Attachment.instrument_id==t.instrument_id)).order_by(Attachment.created_at).all()
+    make_report(t,r,attachments,review,db);db.add(AuditLog(user_id=u.id,action="REPORT_GENERATED",entity_type="REPORT",entity_id=str(r.id)));db.commit()
+    return {"id":r.id,"report_number":r.report_number,"pdf_path":r.pdf_path,"docx_path":r.docx_path}
+
 @router.get("/{report_id}")
 def detail(report_id:int,db:Session=Depends(get_db),u:User=Depends(current_user)):
     r=db.get(Report,report_id)
-    if not r: raise HTTPException(404,"Report not found")
-    if u.role=="LAB_TECHNICIAN" and r.test_session.operator_id!=u.id: raise HTTPException(403,"You can only access your own reports")
-    return {"id":r.id,"report_number":r.report_number,"status":r.status,"test":r.test_session_id}
+    if not r:raise HTTPException(404,"Report not found")
+    if u.role=="LAB_TECHNICIAN" and r.test_session.operator_id!=u.id:raise HTTPException(403,"You can only access your own reports")
+    t=r.test_session
+    return {"id":r.id,"report_number":r.report_number,"status":r.status,"overall_status":evaluation(t),"test_session_id":t.id,"test_date":str(t.test_date),"instrument":{"manufacturer":t.instrument.manufacturer,"model":t.instrument.model,"serial_number":t.instrument.serial_number},"results":[{"test_type":x.test_type,"status":x.status,"calculated_value":x.calculated_value,"limit_value":x.limit_value,"details":x.details} for x in t.results]}
+
 @router.get("/{report_id}/{fmt}")
 def download(report_id:int,fmt:str,db:Session=Depends(get_db),u:User=Depends(current_user)):
-    if fmt not in ("pdf","docx"): raise HTTPException(404,"Format not found")
+    if fmt not in ("pdf","docx"):raise HTTPException(404,"Format not found")
     r=db.get(Report,report_id)
     if not r:raise HTTPException(404,"Report not found")
-    if u.role=="LAB_TECHNICIAN" and r.test_session.operator_id!=u.id: raise HTTPException(403,"You can only access your own reports")
+    if u.role=="LAB_TECHNICIAN" and r.test_session.operator_id!=u.id:raise HTTPException(403,"You can only access your own reports")
     path=r.pdf_path if fmt=="pdf" else r.docx_path
     if not path or not Path(path).is_file():raise HTTPException(404,"Report file is not available")
     return FileResponse(path,filename=f"{r.report_number}.{fmt}")
