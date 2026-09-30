@@ -21,7 +21,14 @@ def listing(db:Session=Depends(get_db),u:User=Depends(current_user)):
     existing={(x.test_type,x.accuracy_class) for x in rules if x.active and x.standard_name=="OIML R-76"}
     inactive={(x.test_type,x.accuracy_class) for x in rules if not x.active and x.standard_name=="OIML R-76"}
     coverage=[{"test_type":test,"accuracy_class":cls,"status":"CONFIGURED" if (test,cls) in existing else ("INACTIVE" if (test,cls) in inactive else "MISSING")} for test in TEST_TYPES for cls in CLASSES]
-    return {"rules":[data(x) for x in rules],"coverage":coverage,"active_versions":active_versions}
+    groups={}
+    for rule in rules:
+        if not rule.active:continue
+        key=(rule.standard_name,rule.standard_version)
+        group=groups.setdefault(key,[])
+        group.append(rule)
+    active_rule_sets=[{"id":f"{name}::{version}","standard_name":name,"version":version,"status":"DEMO_CONFIGURED" if version==DEMO_VERSION else "ACTIVE_CONFIGURED","active":True,"rule_count":len(group),"accuracy_classes":sorted({r.accuracy_class for r in group}),"test_types":sorted({r.test_type for r in group}),"non_official":version==DEMO_VERSION} for (name,version),group in sorted(groups.items())]
+    return {"rules":[data(x) for x in rules],"coverage":coverage,"active_versions":active_versions,"active_rule_sets":active_rule_sets}
 
 @router.post("/demo-profile",status_code=201)
 def load_demo_profile(db:Session=Depends(get_db),u:User=Depends(roles("ADMIN"))):

@@ -49,7 +49,9 @@ class ApiTests(unittest.TestCase):
             configured=client.post("/api/rules",headers=admin,json={"standard_name":"OIML R-76","standard_version":"TEST-FIXTURE-ONLY","rule_code":"TEST-MPE-01","test_type":"MPE","accuracy_class":"III","applicable_range":{"max_load":None,"unit":"kg"},"limit":0.1,"unit":"kg","comparison_operator":"<=","description":"Synthetic rule for automated testing only; not an OIML value.","source_reference":"Automated test fixture; not a controlled OIML citation","active":True})
             self.assertEqual(configured.status_code,201,configured.text)
             self.assertEqual(client.post("/api/rules/demo-profile",headers=admin).status_code,409)
-            self.assertEqual(client.get("/api/rules",headers=admin).status_code,200)
+            listed_rules=client.get("/api/rules",headers=admin)
+            self.assertEqual(listed_rules.status_code,200)
+            self.assertTrue(any(x["standard_name"]=="OIML R-76" and x["version"]=="TEST-FIXTURE-ONLY" for x in listed_rules.json()["active_rule_sets"]))
             evaluated=client.post(f"/api/tests/{tid}/run-compliance",headers=admin)
             self.assertEqual(evaluated.status_code,200,evaluated.text)
             mpe=next(x for x in evaluated.json()["results"] if x["test_type"]=="MPE")
@@ -109,15 +111,22 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(created.json()["operator"],"Laboratory Technician")
             tid=created.json()["id"]
             sample=[{"test_type":"WEIGHING","test_point":f"{load} kg", "applied_load":load,"indicated_value":reading} for load,reading in [(0.2,0.2),(5,5.01),(13,13.01),(26,26.01)]]
+            sample += [{"test_type":"MPE","test_point":"MPE tagged point","applied_load":3,"indicated_value":3.01}]
             sample += [{"test_type":"REPEATABILITY","test_point":f"Repeat {i+1}","applied_load":13,"indicated_value":v} for i,v in enumerate([13,13.01,12.99,13,13])]
             sample += [{"test_type":"ECCENTRICITY","test_point":p,"applied_load":13,"indicated_value":v} for p,v in zip(["Center","Front-left","Front-right","Rear-left","Rear-right"],[13,13.01,12.99,13,13.01])]
             sample += [{"test_type":"TARE","test_point":"Tare check","applied_load":2,"indicated_value":2.005}]
             saved=client.post(f"/api/tests/{tid}/observations",headers=tech,json={"observations":sample})
             self.assertEqual(saved.status_code,201,saved.text)
+            out_of_capacity=client.post(f"/api/tests/{tid}/observations",headers=tech,json={"observations":[{"test_type":"WEIGHING","applied_load":27,"indicated_value":27}]})
+            self.assertEqual(out_of_capacity.status_code,422)
+            malformed=client.put(f"/api/tests/{tid}/observations",headers=tech,json={"observations":[{"test_type":"WEIGHING","applied_load":"bad","indicated_value":1}]})
+            self.assertEqual(malformed.status_code,422)
+            self.assertEqual(len(client.get(f"/api/tests/{tid}",headers=tech).json()["observations"]),len(sample))
             evaluated=client.post(f"/api/tests/{tid}/run-compliance",headers=tech)
             self.assertEqual(evaluated.status_code,200,evaluated.text)
             self.assertEqual(evaluated.json()["overall_status"],"PASS")
             self.assertEqual({r["status"] for r in evaluated.json()["results"]},{"PASS"})
+            self.assertTrue(next(r for r in evaluated.json()["results"] if r["test_type"]=="MPE")["rules"])
             detail=client.get(f"/api/tests/{tid}",headers=tech).json()
             self.assertEqual(detail["status"],"COMPLETED")
             self.assertEqual(detail["instrument_data"]["number_of_verification_intervals_n"],2600)

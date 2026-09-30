@@ -25,6 +25,21 @@ def overall_status(results):
     if "FAIL" in statuses:return "FAIL"
     if len(statuses)!=5 or "NOT_EVALUATED" in statuses:return "NOT_EVALUATED"
     return "PASS" if all(x=="PASS" for x in statuses) else "NOT_EVALUATED"
+def parse_observations(rows,instrument):
+    if not isinstance(rows,list) or not rows:raise HTTPException(422,"Add at least one observation")
+    values=[]
+    for row in rows:
+        if not isinstance(row,dict):raise HTTPException(422,"Each observation must be an object")
+        typ=str(row.get("test_type","WEIGHING")).upper()
+        if typ not in {"WEIGHING","MPE","REPEATABILITY","ECCENTRICITY","TARE"}:raise HTTPException(422,"Unsupported test type")
+        try:applied=float(row["applied_load"]);indicated=float(row["indicated_value"])
+        except (KeyError,TypeError,ValueError):raise HTTPException(422,"Every observation needs numeric applied load and indication")
+        if not math.isfinite(applied) or not math.isfinite(indicated):raise HTTPException(422,"Observation values must be finite")
+        if applied < instrument.min_capacity or applied > instrument.max_capacity:raise HTTPException(422,f"Applied load must be within instrument capacity ({instrument.min_capacity:g}–{instrument.max_capacity:g} {instrument.capacity_unit})")
+        data=row.get("observation_data",{})
+        if not isinstance(data,dict):raise HTTPException(422,"Observation data must be an object")
+        values.append(TestObservation(test_type=typ,test_point=str(row.get("test_point","")),applied_load=applied,indicated_value=indicated,error=indicated-applied,observation_data=data))
+    return values
 def view(t): return {"id":t.id,"instrument_id":t.instrument_id,"instrument":t.instrument.serial_number,"instrument_data":{"manufacturer":t.instrument.manufacturer,"model":t.instrument.model,"serial_number":t.instrument.serial_number,"instrument_type":t.instrument.instrument_type,"accuracy_class":t.instrument.accuracy_class,"max_capacity":t.instrument.max_capacity,"min_capacity":t.instrument.min_capacity,"capacity_unit":t.instrument.capacity_unit,"verification_interval_e":t.instrument.verification_interval_e,"display_interval_d":t.instrument.display_interval_d,"number_of_verification_intervals_n":t.instrument.number_of_verification_intervals_n},"model":t.instrument.model,"operator":t.operator.name,"operator_id":t.operator_id,"status":t.status,"overall_status":overall_status(t.results),"test_date":str(t.test_date),"laboratory":t.laboratory,"temperature":t.temperature,"humidity":t.humidity,"pressure":t.pressure,"remarks":t.remarks,"rejection_reason":t.rejection_reason,"observations":[{"id":o.id,"test_type":o.test_type,"test_point":o.test_point,"applied_load":o.applied_load,"indicated_value":o.indicated_value,"error":o.error,"observation_data":o.observation_data} for o in t.observations],"results":[{"id":r.id,"test_type":r.test_type,"limit_value":r.limit_value,"calculated_value":r.calculated_value,"calculated_unit":r.calculated_unit,"limit_unit":r.limit_unit,"status":r.status,"details":r.details,"standard_name":r.standard_name,"standard_version":r.standard_version,"rule_code":r.rule_code,"rule_description":r.rule_description} for r in t.results]}
 @router.get("")
 def listing(db:Session=Depends(get_db),u:User=Depends(current_user)):
@@ -50,30 +65,16 @@ def add_observations(test_id:int,d:dict,db:Session=Depends(get_db),u:User=Depend
     if not t: raise HTTPException(404,"Test session not found")
     verify_access(t,u)
     if t.status not in ("DRAFT","IN_PROGRESS","COMPLETED","REJECTED"): raise HTTPException(409,"Observations are locked for this workflow status")
-    rows=d.get("observations",[])
-    if not rows: raise HTTPException(422,"Add at least one observation")
-    for row in rows:
-        typ=row.get("test_type","WEIGHING").upper()
-        if typ not in {"WEIGHING","MPE","REPEATABILITY","ECCENTRICITY","TARE"}: raise HTTPException(422,"Unsupported test type")
-        applied=float(row["applied_load"]);indicated=float(row["indicated_value"])
-        t.observations.append(TestObservation(test_type=typ,test_point=str(row.get("test_point","")),applied_load=applied,indicated_value=indicated,error=indicated-applied,observation_data=row.get("observation_data",{})))
-    t.results.clear();t.status="IN_PROGRESS";db.add(AuditLog(user_id=u.id,action="OBSERVATION_UPDATED",entity_type="TEST",entity_id=str(t.id),details=f"Added {len(rows)} observation(s)"));db.commit();return view(t)
+    values=parse_observations(d.get("observations",[]),t.instrument)
+    t.observations.extend(values)
+    t.results.clear();t.status="IN_PROGRESS";db.add(AuditLog(user_id=u.id,action="OBSERVATION_UPDATED",entity_type="TEST",entity_id=str(t.id),details=f"Added {len(values)} observation(s)"));db.commit();return view(t)
 @router.put("/{test_id}/observations")
 def replace_observations(test_id:int,d:dict,db:Session=Depends(get_db),u:User=Depends(roles("ADMIN","LAB_TECHNICIAN"))):
     t=db.get(TestSession,test_id)
     if not t:raise HTTPException(404,"Test session not found")
     verify_access(t,u)
     if t.status not in ("DRAFT","IN_PROGRESS","COMPLETED","REJECTED"):raise HTTPException(409,"Observations are locked for this workflow status")
-    rows=d.get("observations",[])
-    if not rows:raise HTTPException(422,"Add at least one observation")
-    values=[]
-    for row in rows:
-        typ=str(row.get("test_type","WEIGHING")).upper()
-        if typ not in {"WEIGHING","MPE","REPEATABILITY","ECCENTRICITY","TARE"}:raise HTTPException(422,"Unsupported test type")
-        try:applied=float(row["applied_load"]);indicated=float(row["indicated_value"])
-        except (KeyError,TypeError,ValueError):raise HTTPException(422,"Every observation needs numeric applied load and indication")
-        if not math.isfinite(applied) or not math.isfinite(indicated):raise HTTPException(422,"Observation values must be finite")
-        values.append(TestObservation(test_type=typ,test_point=str(row.get("test_point","")),applied_load=applied,indicated_value=indicated,error=indicated-applied,observation_data=row.get("observation_data",{})))
+    values=parse_observations(d.get("observations",[]),t.instrument)
     t.observations.clear();t.observations.extend(values);t.results.clear();t.status="IN_PROGRESS"
     db.add(AuditLog(user_id=u.id,action="OBSERVATION_REPLACED",entity_type="TEST",entity_id=str(t.id),details=f"Replaced observation set with {len(values)} row(s)"));db.commit();return view(t)
 @router.post("/{test_id}/run-compliance")
@@ -82,14 +83,22 @@ def calculate(test_id:int,db:Session=Depends(get_db),u:User=Depends(roles("ADMIN
     if not t: raise HTTPException(404,"Test session not found")
     verify_access(t,u)
     if t.status in ("UNDER_REVIEW","APPROVED"):raise HTTPException(409,"Results are locked while awaiting or after officer review")
-    t.results.clear(); outcome=evaluate_all(t.instrument,t.observations,db.query(RuleConfiguration).filter(RuleConfiguration.active.is_(True)).all())
+    active_rules=db.query(RuleConfiguration).filter(RuleConfiguration.active.is_(True)).all()
+    t.results.clear(); outcome=evaluate_all(t.instrument,t.observations,active_rules)
     t.status="COMPLETED" if outcome["overall_status"] in {"PASS","FAIL"} else "IN_PROGRESS"
     versions=sorted({f"{x['rules'][0].standard_name} {x['rules'][0].standard_version}" for x in outcome["results"] if x.get("rules")})
     for r in outcome["results"]:
         rule=r.get("rule") or (r.get("rules") or [None])[0]
         t.results.append(ComplianceResult(test_type=r["test_type"],rule_id=rule.id if rule else None,evaluated_by=u.id,limit_value=r["limit"],limit_unit=rule.unit if rule else "",calculated_value=r["calculated_value"],calculated_unit=r["calculated_unit"],status=r["status"],details=r["details"],standard_name=rule.standard_name if rule else "OIML R-76",standard_version=rule.standard_version if rule else "UNCONFIGURED",rule_code=rule.rule_code if rule else "MISSING_RULE",rule_description=rule.description if rule else r["details"]))
     audit_data={"overall_status":outcome["overall_status"],"active_rule_versions":versions,"results":[{"test_type":r["test_type"],"status":r["status"],"rule_ids":[x.id for x in r.get("rules",[])]} for r in outcome["results"]]}
-    db.add(AuditLog(user_id=u.id,action="COMPLIANCE_EVALUATION_RUN",entity_type="TEST",entity_id=str(t.id),details=json.dumps(audit_data)));db.commit();return {"overall_status":outcome["overall_status"],"standard_name":"OIML R-76","standard_version":", ".join(versions) if versions else "UNCONFIGURED","results":[{"test_type":r["test_type"],"calculated_value":r["calculated_value"],"calculated_unit":r["calculated_unit"],"limit":r["limit"],"limit_unit":((r.get("rule") or (r.get("rules") or [None])[0]).unit if (r.get("rule") or r.get("rules")) else ""),"status":r["status"],"details":r["details"],"rule_code":(r.get("rule") or (r.get("rules") or [None])[0]).rule_code if (r.get("rule") or r.get("rules")) else "MISSING_RULE","rule_description":(r.get("rule") or (r.get("rules") or [None])[0]).description if (r.get("rule") or r.get("rules")) else r["details"],"standard_version":(r.get("rule") or (r.get("rules") or [None])[0]).standard_version if (r.get("rule") or r.get("rules")) else "UNCONFIGURED"} for r in outcome["results"]]}
+    db.add(AuditLog(user_id=u.id,action="COMPLIANCE_EVALUATION_RUN",entity_type="TEST",entity_id=str(t.id),details=json.dumps(audit_data)));db.commit()
+    results=[]
+    for r in outcome["results"]:
+        chosen=r.get("rule") or (r.get("rules") or [None])[0]
+        compared={rule.id:rule for rule in r.get("rules",[])}
+        if chosen:compared[chosen.id]=chosen
+        results.append({"test_type":r["test_type"],"calculated_value":r["calculated_value"],"calculated_unit":r["calculated_unit"],"limit":r["limit"],"limit_unit":chosen.unit if chosen else "","status":r["status"],"details":r["details"],"rule_code":chosen.rule_code if chosen else "MISSING_RULE","rule_description":chosen.description if chosen else r["details"],"standard_version":chosen.standard_version if chosen else "UNCONFIGURED","rules":[{"id":x.id,"rule_code":x.rule_code,"standard_name":x.standard_name,"standard_version":x.standard_version,"limit":x.limit_value,"unit":x.unit,"comparison_operator":x.comparison_operator,"applicable_range":x.applicable_range} for x in compared.values()]})
+    return {"overall_status":outcome["overall_status"],"standard_name":"OIML R-76","standard_version":", ".join(versions) if versions else "UNCONFIGURED","results":results}
 @router.post("/{test_id}/submit")
 def submit(test_id:int,db:Session=Depends(get_db),u:User=Depends(roles("ADMIN","LAB_TECHNICIAN"))):
     t=db.get(TestSession,test_id)

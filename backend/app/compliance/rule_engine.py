@@ -42,7 +42,8 @@ def _in_range(rule, instrument, observation):
 def evaluate_all(instrument, observations, rules):
     results=[]
     for test_type in TEST_TYPES:
-        obs=[o for o in observations if o.test_type.upper()=="WEIGHING"] if test_type in {"MPE","WEIGHING"} else [o for o in observations if o.test_type.upper()==test_type]
+        accepted={"WEIGHING","MPE"} if test_type=="MPE" else {"WEIGHING"} if test_type=="WEIGHING" else {test_type}
+        obs=[o for o in observations if o.test_type.upper() in accepted]
         raw=_value(test_type,obs)
         candidates=[r for r in rules if r.active and r.standard_name=="OIML R-76" and r.test_type==test_type and r.accuracy_class==instrument.accuracy_class]
         if not candidates:
