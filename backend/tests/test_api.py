@@ -96,9 +96,11 @@ class ApiTests(unittest.TestCase):
             tech={"Authorization":"Bearer "+tech_login["access_token"]}
             officer_login=client.post("/api/auth/login",data={"username":"officer@nawi.local","password":"Officer@123"}).json()
             officer={"Authorization":"Bearer "+officer_login["access_token"]}
+            startup_rules=client.get("/api/rules",headers=admin).json()
+            self.assertTrue(any(x["version"]=="SIH-DEMO-1.0 (NON-OFFICIAL)" for x in startup_rules["active_rule_sets"]))
             profile=client.post("/api/rules/demo-profile",headers=admin)
             self.assertEqual(profile.status_code,201,profile.text)
-            self.assertEqual(profile.json()["created"],5)
+            self.assertIn(profile.json()["created"],[0,5])
             self.assertIn("not official oiml values",profile.json()["notice"].lower())
             self.assertEqual(client.post("/api/rules/demo-profile",headers=tech).status_code,403)
             self.assertEqual(client.post("/api/rules/demo-profile",headers=admin).json()["created"],0)

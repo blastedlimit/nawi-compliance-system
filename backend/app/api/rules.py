@@ -14,6 +14,17 @@ DEMO_VERSION="SIH-DEMO-1.0 (NON-OFFICIAL)"
 DEMO_LIMITS={"MPE":0.02,"WEIGHING":0.02,"REPEATABILITY":0.02,"ECCENTRICITY":0.03,"TARE":0.01}
 def data(r):return {"id":r.id,"standard_name":r.standard_name,"standard_version":r.standard_version,"rule_code":r.rule_code,"test_type":r.test_type,"accuracy_class":r.accuracy_class,"applicable_range":r.applicable_range,"limit":r.limit_value,"unit":r.unit,"comparison_operator":r.comparison_operator,"description":r.description,"active":r.active,"source_reference":r.source_reference,"created_at":r.created_at,"updated_at":r.updated_at}
 
+def seed_demo_profile_if_empty(db,user_id=None):
+    """Seed only a brand-new, unconfigured database with non-official demo rules."""
+    existing=db.query(RuleConfiguration).filter(RuleConfiguration.standard_name=="OIML R-76").first()
+    if existing:return False
+    for test_type,limit in DEMO_LIMITS.items():
+        rule=RuleConfiguration(standard_name="OIML R-76",standard_version=DEMO_VERSION,rule_code=f"SIH-DEMO-{test_type}-01",test_type=test_type,accuracy_class="III",applicable_range={"min_load":0.0,"max_load":26.0,"unit":"kg"},limit_value=limit,unit="kg",comparison_operator="<=",description=f"Illustrative SIH demonstration threshold for {test_type}; not an official OIML R-76 limit and not suitable for legal verification.",source_reference="SIH prototype demonstration profile, version 1.0; synthetic configurable value, no official OIML clause claimed",active=True)
+        db.add(rule);db.flush()
+        db.add(AuditLog(user_id=user_id,action="RULE_CONFIGURATION_CHANGED",entity_type="RULE",entity_id=str(rule.id),details=f"Seeded explicitly non-official {DEMO_VERSION} profile rule {rule.rule_code} on an unconfigured database"))
+    db.commit()
+    return True
+
 @router.get("")
 def listing(db:Session=Depends(get_db),u:User=Depends(current_user)):
     rules=db.query(RuleConfiguration).order_by(RuleConfiguration.standard_version.desc(),RuleConfiguration.test_type,RuleConfiguration.accuracy_class).all()

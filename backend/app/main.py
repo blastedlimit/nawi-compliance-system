@@ -27,6 +27,10 @@ def initialize():
         for name,email,password,role in [("NAWI Administrator","admin@nawi.local","Admin@123","ADMIN"),("Laboratory Technician","technician@nawi.local","Tech@123","LAB_TECHNICIAN"),("Approving Officer","officer@nawi.local","Officer@123","APPROVING_OFFICER")]:
             if not db.query(User).filter_by(email=email).first():db.add(User(name=name,email=email,password_hash=hash_password(password),role=role))
         db.commit()
+        # Fresh prototype deployments get a clearly non-official profile so the
+        # compare/report workflow works immediately. Never replace configured rules.
+        admin=db.query(User).filter_by(role="ADMIN",is_active=True).first()
+        rules.seed_demo_profile_if_empty(db,admin.id if admin else None)
     finally:db.close()
 @app.get("/api/health")
 def health():return {"status":"ok","service":"nawi-compliance-api"}
